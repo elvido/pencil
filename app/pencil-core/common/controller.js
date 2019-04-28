@@ -1,6 +1,7 @@
 function Controller(canvasPool, applicationPane) {
     this.canvasPool = canvasPool;
     this.applicationPane = applicationPane;
+    this.activePageLoading = false;
     var thiz = this;
     this.canvasPool.canvasContentModifiedListener = function (canvas) {
         thiz.handleCanvasModified(canvas);
@@ -27,7 +28,7 @@ Controller.prototype.makeSubDir = function (sub) {
     return fullPath;
 };
 Controller.prototype.getDocumentName = function () {
-    return this.documentPath ? path.basename(this.documentPath).replace(/\.epz$/, "") : "* Unsaved document";
+    return this.documentPath ? path.basename(this.documentPath).replace(/\.[a-z]+$/, "") : "* Unsaved document";
 };
 // Controller.prototype.newDocument = function () {
 //     var thiz = this;
@@ -59,6 +60,7 @@ Controller.prototype.confirmAndclose = function (onClose) {
         this.modified = false;
 
         this.sayControllerStatusChanged();
+        ShapeTestCanvasPane._instance.quitTesting();
 
         if (onClose) onClose();
     }.bind(this);
@@ -217,16 +219,22 @@ Controller.prototype.serializeDocument = function (onDone) {
     var thiz = this;
 
     var embeddableFontFaces = [];
+    var refResourceIds = [];
 
-    function embedFonts() {
-        if (embeddableFontFaces.length <= 0) return;
-        FontLoader.instance.embedToDocumentRepo(embeddableFontFaces);
+    function postProcess() {
+        if (embeddableFontFaces.length > 0) {
+            //console.log("Fonts to embed:", embeddableFontFaces);
+            FontLoader.instance.embedToDocumentRepo(embeddableFontFaces);
+        }
+
+        //console.log("Referenced resources: ", refResourceIds);
+        thiz.registeredResourceIds = refResourceIds;
     }
 
     function next() {
         index ++;
         if (index >= thiz.doc.pages.length) {
-            embedFonts();
+            postProcess();
             if (onDone) onDone();
             return;
         }
@@ -237,10 +245,18 @@ Controller.prototype.serializeDocument = function (onDone) {
             thiz.serializePage(page, page.tempFilePath);
         }
 
-        var pageEmbeddableFontFaces = thiz.findEmbeddableFontFaces(page);
+        var resourceReferences = thiz.findResourceReferences(page);
+
+        var pageEmbeddableFontFaces = resourceReferences.fontFaces;
         if (pageEmbeddableFontFaces) {
             pageEmbeddableFontFaces.forEach(function (face) {
                 if (embeddableFontFaces.indexOf(face) < 0) embeddableFontFaces.push(face);
+            });
+        }
+        var pageRefResourceIds = resourceReferences.resourceIds;
+        if (pageRefResourceIds) {
+            pageRefResourceIds.forEach(function (id) {
+                if (refResourceIds.indexOf(id) < 0) refResourceIds.push(id);
             });
         }
 
@@ -259,7 +275,12 @@ Controller.prototype.serializeDocument = function (onDone) {
     next();
 };
 
-Controller.prototype.findEmbeddableFontFaces = function (page) {
+Controller.prototype.countResourceReferences = function (page) {
+    var result = {
+        fontFaces: {},
+        resources: {}
+    };
+
     var contextNode = null;
     if (page.canvas) {
         contextNode = page.canvas.drawingLayer;
@@ -267,8 +288,6 @@ Controller.prototype.findEmbeddableFontFaces = function (page) {
         var dom = Controller.parser.parseFromString(fs.readFileSync(page.tempFilePath, "utf8"), "text/xml");
         contextNode = Dom.getSingle("/p:Page/p:Content", dom);
     }
-
-    var faces = [];
 
     Dom.workOn(".//svg:g[@p:type='Shape']", contextNode, function (node) {
         var defId = node.getAttributeNS(PencilNamespaces.p, "def");
@@ -278,18 +297,76 @@ Controller.prototype.findEmbeddableFontFaces = function (page) {
         Dom.workOn("./p:metadata/p:property", node, function (propNode) {
             var name = propNode.getAttribute("name");
             var propDef = def.getProperty(name);
-            if (!propDef || propDef.type != Font) return;
-            var value = propNode.textContent;
-            var font = Font.fromString(value);
-            if (!font) return;
+            if (!propDef) return;
 
-            if (faces.indexOf(font.family) < 0 && FontLoader.instance.isFontExisting(font.family)) {
-                faces.push(font.family);
+            var value = propNode.textContent;
+
+            if (propDef.type == Font) {
+                var font = Font.fromString(value);
+                if (!font) return;
+
+                var holders = result.fontFaces[font.family] || [];
+                if (holders.length || FontLoader.instance.isFontExisting(font.family)) {
+                    holders.push(node);
+                }
+                result.fontFaces[font.family] = holders;
+            } else if (propDef.type == ImageData) {
+                var imageData = ImageData.fromString(value);
+                if (!imageData || !imageData.data) return;
+
+                var id = ImageData.refStringToId(imageData.data);
+                if (!id) return;
+
+                var holders = result.resources[id] || [];
+                holders.push(node);
+                result.resources[id] = holders;
             }
         });
     });
 
-    return faces;
+    return result;
+};
+Controller.prototype.findResourceReferences = function (page) {
+    var refs = this.countResourceReferences(page);
+    
+    
+    return {
+        fontFaces: Object.keys(refs.fontFaces),
+        resourceIds: Object.keys(refs.resources)
+    };
+};
+Controller.prototype.getResourceReferences = function (resourceId, pages) {
+    if (!pages) pages = this.doc.pages;
+    else if (!Array.isArray(pages)) pages = [pages];
+
+    var result = {
+        fontFaces: {},
+        resources: {}
+    };
+    function appendRef(overall, refs) {
+        for (var k in refs) {
+            var ri = overall[k] || {
+                total: 0,
+                references: []
+            };
+            var holders = refs[k];
+            var n = holders ? holders.length : 0;
+            ri.total += n;
+            ri.references.push({"count": n, "page": page, "holders": holders});
+
+            overall[k] = ri;
+        }
+        return overall;
+    };
+    for (var i = 0; i < pages.length; i++) {
+        var page = pages[i];
+        var refs = this.countResourceReferences(page);
+
+        result.fontFaces = appendRef(result.fontFaces, refs.fontFaces);
+        result.resources = appendRef(result.resources, refs.resources);
+    }
+
+    return resourceId ? (result.resources[resourceId] || result.fontFaces[resourceId]) : result;
 };
 
 // Controller.prototype.openDocument = function (callback) {
@@ -633,6 +710,8 @@ Controller.prototype.updateCanvasState = function () {
 Controller.prototype.activatePage = function (page) {
     if (page == null || this.activePage && page.id == this.activePage.id) return;
 
+    this.activePageLoading = true;
+
     this.updateCanvasState();
 
     this.retrievePageCanvas(page);
@@ -645,6 +724,7 @@ Controller.prototype.activatePage = function (page) {
     page.lastUsed = new Date();
     this.activePage = page;
     page.canvas._sayTargetChanged();
+    this.activePageLoading = false;
     // this.sayDocumentChanged();
 };
 Controller.prototype.ensurePageCanvasBackground = function (page) {
@@ -949,6 +1029,17 @@ Controller.prototype.sizeToBestFit = function (passedPage) {
         this.sayDocumentChanged();
     }
 };
+Controller.prototype.setActiveCanvasSize = function (width, height) {
+    var canvas = this.activePage.canvas;
+    if (!canvas) return;
+    var newSize = this.applicationPane.getBestFitSizeObject();
+    canvas.setSize(width, height);
+    this.activePage.width = width;
+    this.activePage.height = height;
+    Config.set("lastSize", [width, height].join("x"));
+    this.invalidateBitmapFilePath(this.activePage);
+    this.sayDocumentChanged();
+};
 Controller.prototype.getBestFitSize = function () {
     return this.applicationPane.getBestFitSize();
 };
@@ -997,6 +1088,38 @@ Controller.prototype.rasterizeCurrentPage = function (targetPage) {
     }.bind(this));
 };
 
+Controller.prototype.copyPageBitmap = function (targetPage) {
+    var page = targetPage ? targetPage : (this.activePage ? this.activePage : null);
+    if (!page) {
+        return;
+    }
+
+    var crop = Config.get(Config.EXPORT_CROP_FOR_CLIPBOARD, false);
+
+    if (crop) {
+        page.canvas.selectAll();
+        page.canvas.doGroup();
+        page.canvas.sizeToContent(20, 20);
+
+        page.width = page.canvas.width;
+        page.height = page.canvas.height;
+    }
+
+    var thiz = this;
+
+    window.setTimeout(function () {
+        var tmp = require("tmp");
+        var filePath = tmp.tmpNameSync();
+        thiz.applicationPane.rasterizer.rasterizePageToFile(page, filePath, function (p, error) {
+            if (!error) {
+                clipboard.writeImage(filePath);
+
+                NotificationPopup.show("Page bitmap copied into clipboard.");
+            }
+        });
+    }, 100);
+};
+
 Controller.prototype.rasterizeSelection = function () {
     var target = Pencil.activeCanvas.currentController;
     if (!target || !target.getGeometry) return;
@@ -1009,7 +1132,13 @@ Controller.prototype.rasterizeSelection = function () {
         ]
     }, function (filePath) {
         if (!filePath) return;
-        this.applicationPane.rasterizer.rasterizeSelectionToFile(target, filePath, function () {});
+        this.applicationPane.rasterizer.rasterizeSelectionToFile(target, filePath, function (p, error) {
+            if (!error) {
+                NotificationPopup.show("Selection exprted as '" + path.basename(filePath) + "'.", "View", function () {
+                    shell.openItem(filePath);
+                });
+            }
+        });
     }.bind(this));
 };
 
@@ -1047,10 +1176,48 @@ Controller.prototype.copyAsRef = function (sourcePath, callback) {
 
     rd.pipe(wr);
 };
+Controller.prototype.generateCollectionResourceRefId = function (collection, resourcePath) {
+    var id = "collection " + collection.id + " " + resourcePath;
+    var md5 = require("md5");
+    id = md5(id) + path.extname(resourcePath);
+
+    id = id.replace(/[^a-z\-0-9]+/gi, "_");
+
+    return id;
+};
+Controller.prototype.collectionResourceAsRefSync = function (collection, resourcePath) {
+    var parts = resourcePath.split("/");
+    sourcePath = collection.installDirPath;
+    for (var p of parts) {
+        if (p.indexOf("..") >= 0 || p.indexOf("\\") >= 0) return null;
+        sourcePath = path.join(sourcePath, p);
+    }
+    if (!fs.existsSync(sourcePath)) {
+        console.error("Path not found: " + sourcePath);
+        return null;
+    }
+
+    var id = this.generateCollectionResourceRefId(collection, resourcePath);
+
+    var filePath = path.join(this.makeSubDir(Controller.SUB_REFERENCE), id);
+
+    if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, fs.readFileSync(sourcePath));
+    }
+
+    return id;
+};
 Controller.prototype.nativeImageToRefSync = function (nativeImage) {
     var id = Util.newUUID() + ".png";
     var filePath = path.join(this.makeSubDir(Controller.SUB_REFERENCE), id);
     fs.writeFileSync(filePath, nativeImage.toPng());
+
+    return id;
+};
+Controller.prototype.svgImageToRefSync = function (svg) {
+    var id = Util.newUUID() + "_svg";
+    var filePath = path.join(this.makeSubDir(Controller.SUB_REFERENCE), id);
+    fs.writeFileSync(filePath, svg, "utf8");
 
     return id;
 };
@@ -1251,14 +1418,212 @@ Controller.prototype.prepareForEmbedding = function (node, onPreparingDoneCallba
     });
 };
 
+Controller.prototype.exportAsLayout = function () {
+    var container = Pencil.activeCanvas.drawingLayer;
 
-window.onbeforeunload = function (event) {
+    var pw = parseFloat(this.activePage.width);
+    var ph = parseFloat(this.activePage.height);
+
+    var items = [];
+
+    var outputPath = null;
+    var outputDir = null;
+    const IMAGE_FILE = "layout_image.png";
+
+    var devCollection = CollectionManager.getDeveloperStencil();
+
+    Dom.workOn("//svg:g[@p:type='Shape']", container, function (g) {
+            var dx = 0; //rect.left;
+            var dy = 0; //rect.top;
+
+            var owner = g.ownerSVGElement;
+
+            if (owner.parentNode && owner.parentNode.getBoundingClientRect) {
+                var rect = owner.parentNode.getBoundingClientRect();
+                dx = rect.left;
+                dy = rect.top;
+            }
+
+            debug("dx, dy: " + [dx, dy]);
+
+            rect = g.getBoundingClientRect();
+
+            var linkingInfo = {
+                node: g,
+                sc: g.getAttributeNS(PencilNamespaces.p, "sc"),
+                refId: g.getAttributeNS(PencilNamespaces.p, "def"),
+                geo: {
+                    x: rect.left - dx,
+                    y: rect.top - dy,
+                    w: rect.width - 2,
+                    h: rect.height - 2
+                }
+            };
+
+            if (devCollection) {
+                if (linkingInfo.sc) {
+                    if (!devCollection.getShortcutByDisplayName(devCollection.id + ":" + linkingInfo.sc)) return;
+                } else if (linkingInfo.refId) {
+                    if (!devCollection.getShapeDefById(linkingInfo.refId)) return;
+                }
+            }
+//            if (!linkingInfo.refId) return;
+
+            items.push(linkingInfo);
+    });
+
+    var current = 0;
+    var thiz = this;
+    var done = function () {
+        var html = document.createElementNS(PencilNamespaces.html, "html");
+
+        var body = document.createElementNS(PencilNamespaces.html, "body");
+        html.appendChild(body);
+
+        var div = document.createElementNS(PencilNamespaces.html, "div");
+        div.setAttribute("style", "position: relative; padding: 0px; margin: 0px; width: " + pw + "px; height: " + ph + "px;");
+        body.appendChild(div);
+
+        /*
+        var canvas = document.createElementNS(PencilNamespaces.html, "canvas");
+        canvas.setAttribute("width", pw);
+        canvas.setAttribute("height", ph);
+
+        */
+
+        var bg = document.createElementNS(PencilNamespaces.html, "img");
+        bg.setAttribute("style", "width: " + pw + "px; height: " + ph + "px;");
+        bg.setAttribute("src", IMAGE_FILE + "?ts=" + (new Date().getTime()));
+        div.appendChild(bg);
+
+        for (var i = 0; i < items.length; i ++) {
+            var link = items[i];
+            var img = document.createElementNS(PencilNamespaces.html, "img");
+            img.setAttribute("src", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQYV2NgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=");
+            if (link.sc) {
+                img.setAttribute("sc-ref", link.sc);
+            } else {
+                img.setAttribute("ref", link.refId);
+            }
+            img.setAttribute("id", link.refId);
+            var css = new CSS();
+            css.set("position", "absolute");
+            css.set("left", "" + link.geo.x + "px");
+            css.set("top", "" + link.geo.y + "px");
+            css.set("width", "" + link.geo.w + "px");
+            css.set("height", "" + link.geo.h + "px");
+            /*
+            css.set("left", "" + (100 * link.geo.x / pw) + "%");
+            css.set("top", "" + (100 * link.geo.y / ph) + "%");
+            css.set("width", "" + (100 * link.geo.w / pw) + "%");
+            css.set("height", "" + (100 * link.geo.h / ph) + "%");
+            */
+            img.setAttribute("style", css.toString());
+
+            div.appendChild(img);
+        }
+
+        Dom.serializeNodeToFile(html, outputPath, "");
+        CollectionManager.reloadDeveloperStencil();
+    };
+
+
+    var defaultPath = "Layout.xhtml";
+    if (devCollection) {
+        defaultPath = path.join(devCollection.installDirPath, defaultPath);
+    }
+
+    dialog.showSaveDialog(remote.getCurrentWindow(), {
+        title: "Export Layout",
+        defaultPath: defaultPath,
+        filters: [{name: 'XHTML Layout', extensions: ["xhtml"]}]
+    }, function (filePath) {
+        if (filePath) {
+            outputPath = filePath;
+            outputImage = path.join(path.dirname(outputPath), IMAGE_FILE);
+            Pencil.rasterizer.rasterizePageToFile(thiz.activePage, outputImage, function (p, error) {
+                done();
+            });
+        }
+    });
+};
+
+Controller.prototype.getDocumentPageMargin = function () {
+    if (!StencilCollectionBuilder.isDocumentConfiguredAsStencilCollection()) {
+        return null;
+    }
+    var options = StencilCollectionBuilder.getCurrentDocumentOptions();
+    if (!options) {
+        return null;
+    }
+
+    return options.pageMargin || Config.get(Config.DEV_PAGE_MARGIN_SIZE) || 40;
+};
+
+Controller.prototype.logShapeReparationRequest = function (shapeNode) {
+    if (!this.repairingShapes) this.repairingShapes = [];
+    this.repairingShapes.push(shape);
+};
+
+Config.CAPTURE_INSERT_BITMAP_AS_DEFID = Config.define("capture.insert_bitmap_shape_id", "Evolus.Common:Bitmap");
+
+Controller.prototype.handleGlobalScreencapture = function (mode) {
+    var newDocumentCreated = false;
+    if (!this.doc) {
+        Pencil.documentHandler.newDocument();
+        newDocumentCreated = true;
+    }
+
+
+    ImageData.fromScreenshot(function (imageData, error) {
+        if (imageData) {
+            electron.remote.getCurrentWindow().show();
+            electron.remote.getCurrentWindow().focus();
+
+            if (!newDocumentCreated) {
+                this.newPage("Capture " + new Date(), imageData.w, imageData.h, null, Color.fromString("#FFFFFFFF"), "", null, true);
+            } else {
+                this.setActiveCanvasSize(imageData.w, imageData.h)
+            }
+
+            var page = this.activePage;
+
+            var def = CollectionManager.shapeDefinition.locateDefinition(Config.get(Config.CAPTURE_INSERT_BITMAP_AS_DEFID));
+            if (!def) return;
+
+            page.canvas.insertShape(def, null);
+            if (!page.canvas.currentController) return;
+
+            var controller = page.canvas.currentController;
+
+            var dim = new Dimension(imageData.w, imageData.h);
+            page.canvas.currentController.setProperty("imageData", imageData);
+            page.canvas.currentController.setProperty("box", dim);
+            page.canvas.invalidateEditors();
+        }
+    }.bind(this), mode ? {
+        mode: mode,
+        includePointer: false,
+        hidePencil: false,
+        delay: 0
+    } : undefined);
+};
+
+
+window.addEventListener("beforeunload", function (event) {
     // Due to a change of Chrome 51, returning non-empty strings or true in beforeunload handler now prevents the page to unload
+    if (Pencil.documentHandler && Pencil.documentHandler.isSaving) {
+        console.log("Close during save prevented!");
+        event.returnValue = false;
+        return;
+    }
+
     var remote = require("electron").remote;
     if (remote.app.devEnable) return;
 
     if (Controller.ignoreNextClose) {
         Controller.ignoreNextClose = false;
+        event.returnValue = false;
         return;
     }
 
@@ -1270,6 +1635,14 @@ window.onbeforeunload = function (event) {
                 currentWindow.close();
             });
         }, 10);
-        return true;
+        event.returnValue = false;
+        return;
     }
-};
+});
+Config.SHORTCUT_GLOBALSCREENCAPTURE_AREA = Config.define("shortcut.global.screencapture_area", "Super+F12");
+GlobalShortcutHelper.register("global-screencapture-area", Config.get(Config.SHORTCUT_GLOBALSCREENCAPTURE_AREA), function () {
+    console.log("global-screencapture-area triggered");
+    if (!Controller._instance) return;
+
+    Controller._instance.handleGlobalScreencapture(BaseCaptureService.MODE_AREA);
+});

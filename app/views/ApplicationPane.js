@@ -9,11 +9,6 @@ function ApplicationPane() {
     this.canvasMenu = new CanvasMenu();
 
     this.documentHandler = new DocumentHandler(this.controller);
-    this.documentHandler.registerHandler(new EpzHandler(this.controller));
-    this.documentHandler.registerHandler(new EpgzHandler(this.controller));
-    this.documentHandler.registerHandler(new EpHandler(this.controller));
-    var handlerType = Config.get("document.fileHandler.fileHandlerType", ".epgz");
-    this.documentHandler.actived(handlerType);
 
     Pencil.documentHandler = this.documentHandler;
     Pencil.controller = this.controller;
@@ -24,7 +19,6 @@ function ApplicationPane() {
     //this.toolBarSrollView.setWheelAllow(false);
 
     this.bind("focusout", function(ev) {
-        console.log(ev.target);
         if (ev.target) {
             this.toolBarSrollView.setWheelAllow(true);
         }
@@ -47,6 +41,7 @@ function ApplicationPane() {
     }, this.menuIcon);
 
     this.bind("p:DocumentChanged", this.onDocumentChanged, this.node());
+    window.globalEventBus.listen("doc-options-change", this.onDocumentOptionsChanged.bind(this));
 
     this.bind("p:PageInfoChanged", function (event) {
         this.pageListView.handlePageInfoChangedEvent(event);
@@ -108,15 +103,23 @@ function ApplicationPane() {
         }
     }, this.toolbarContainer)
 
+    Pencil.handleArguments();
     FontLoader.instance.loadFonts();
 }
 __extend(BaseTemplatedWidget, ApplicationPane);
 ApplicationPane.prototype.onAttached = function () {
     var thiz = this;
+    this.invalidateUIForConfig();
     this.showStartupPane();
     // window.setTimeout(function () {
     //     thiz.controller.newDocument();
     // }, 100);
+};
+ApplicationPane.prototype.invalidateUIForConfig = function () {
+    debug("BOOT: invalidating UI using configuration");
+    var useCompactLayout = Config.get("view.useCompactLayout", false);
+    document.body.setAttribute("compact-layout", useCompactLayout);
+    this.toolBarSrollView.invalidate();
 };
 ApplicationPane.prototype.invalidateUIForControllerStatus = function () {
     if (this.controller.doc) {
@@ -153,7 +156,18 @@ ApplicationPane.prototype.createCanvas = function () {
     container.style.height = h + "px";
     Dom.addClass(container, "Canvas");
 
-    var canvas = new Canvas(container);
+    var stencilToolbar = new StencilShapeCanvasToolbar().into(wrapper);
+
+    var canvas = null;
+    
+    
+    scrollPane.addEventListener("mouseup", function (e) {
+        if (!Dom.findParentWithClass(e.target, "CanvasWrapper")) {
+            if (!canvas.isSelectingRange) canvas.selectNone();
+        }
+    });
+    
+    canvas = new Canvas(container, null, scrollPane);
 
     this.getCanvasContainer().appendChild(scrollPane);
     wrapper._canvas = canvas;
@@ -162,6 +176,8 @@ ApplicationPane.prototype.createCanvas = function () {
     canvas._scrollPane = scrollPane;
 
     scrollPane.style.display = "none";
+
+    stencilToolbar.canvas = canvas;
 
     canvas.element.addEventListener("p:SizeChanged", function () {
         var w = Math.ceil(canvas.width * canvas.zoom);
@@ -175,9 +191,17 @@ ApplicationPane.prototype.createCanvas = function () {
 };
 ApplicationPane.prototype.onDocumentChanged = function () {
     this.pageListView.currentPage = this.controller.activePage;
-    this.controller.activePage.canvas._sayTargetChanged();
+    if (this.pageListView.currentPage != null && this.pageListView.currentPage.canvas != null) {
+        this.pageListView.currentPage.canvas._sayTargetChanged();
+    }
     this.pageListView.renderPages();
+
+    this.onDocumentOptionsChanged();
 };
+ApplicationPane.prototype.onDocumentOptionsChanged = function () {
+    this.getCanvasContainer().setAttribute("stencil-dev-mode", StencilCollectionBuilder.isDocumentConfiguredAsStencilCollection() ? true : false);
+};
+
 ApplicationPane.prototype.activatePage = function (page) {
     this.pageListView.activatePage(page);
 }
@@ -205,6 +229,10 @@ ApplicationPane.prototype.setActiveCanvas = function (canvas) {
 
     if (canvas != null) {
         this.startupDocumentView.node().style.display = "none";
+        if (canvas.__dirtyGraphic) {
+            canvas.invalidateAll();
+            canvas.__dirtyGraphic = false;
+        }
         canvas.focus();
     }
 
@@ -217,6 +245,7 @@ ApplicationPane.prototype.invalidateZoom = function () {
     this.zoomToolbar.setAttribute("label", Pencil.activeCanvas ? (Math.round(Pencil.activeCanvas.zoom * 100) + "%") : "100%") ;
 };
 ApplicationPane.prototype.showStartupPane = function () {
+    debug("BOOT: Showing startup pane...");
     Pencil.documentHandler.preDocument = null;
     if (Pencil.controller.activePage) {
         Pencil.controller.activePage.canvas.selectNone();
@@ -226,22 +255,35 @@ ApplicationPane.prototype.showStartupPane = function () {
     this.startupDocumentView.node().style.display = "flex";
 
     this.invalidateUIForControllerStatus();
+    debug("BOOT:   >> Done");
 };
 const NO_CONTENT_VALUE = 22;
+ApplicationPane.prototype.getNoContentValue = function () {
+    var compact = Config.get("view.useCompactLayout", false);
+    return compact ? 0 : NO_CONTENT_VALUE;
+}
+ApplicationPane.prototype.getCanvasToolbarHeight = function () {
+    return StencilCollectionBuilder.isDocumentConfiguredAsStencilCollection() ? Math.round(3 * Util.em()) : 0;
+};
 ApplicationPane.prototype.getPreferredCanvasSize = function () {
+    var toolbarPadding = this.getCanvasToolbarHeight();
+
     return {
-        w: Math.round(this.contentBody.offsetWidth - 2 * Pencil._getCanvasPadding()) - NO_CONTENT_VALUE,
-        h: Math.round(this.contentBody.offsetHeight - 2 * Pencil._getCanvasPadding()) - NO_CONTENT_VALUE
+        w: Math.round(this.contentBody.offsetWidth - 2 * Pencil._getCanvasPadding()) - this.getNoContentValue(),
+        h: Math.round(this.contentBody.offsetHeight - 2 * Pencil._getCanvasPadding()) - this.getNoContentValue() - toolbarPadding
     }
 };
 ApplicationPane.prototype.getBestFitSize = function () {
     var zoom = Pencil.activeCanvas ? (1 / Pencil.activeCanvas.zoom) : 1;
-    return [zoom * (this.contentBody.offsetWidth - 2 * Pencil._getCanvasPadding() - NO_CONTENT_VALUE),
-            zoom * (this.contentBody.offsetHeight - 2 * Pencil._getCanvasPadding() - NO_CONTENT_VALUE)].join("x");
+    var toolbarPadding = this.getCanvasToolbarHeight();
+
+    return [zoom * (this.contentBody.offsetWidth - 2 * Pencil._getCanvasPadding() - this.getNoContentValue()),
+            zoom * (this.contentBody.offsetHeight - 2 * Pencil._getCanvasPadding() - this.getNoContentValue() - toolbarPadding)].join("x");
 };
 ApplicationPane.prototype.getBestFitSizeObject = function () {
     var zoom = Pencil.activeCanvas ? (1 / Pencil.activeCanvas.zoom) : 1;
-    return {width: zoom * (this.contentBody.offsetWidth - 2 * Pencil._getCanvasPadding() - NO_CONTENT_VALUE), height: zoom * (this.contentBody.offsetHeight - 2 * Pencil._getCanvasPadding() - NO_CONTENT_VALUE)};
+    var toolbarPadding = this.getCanvasToolbarHeight();
+    return {width: zoom * (this.contentBody.offsetWidth - 2 * Pencil._getCanvasPadding() - this.getNoContentValue()), height: zoom * (this.contentBody.offsetHeight - 2 * Pencil._getCanvasPadding() - this.getNoContentValue() - toolbarPadding)};
 };
 ApplicationPane.prototype.showBusyIndicator = function () {
     this.currentBusyOverlay = document.createElement("div");
@@ -258,9 +300,19 @@ ApplicationPane.prototype.busy = function () {
     this.busyCount ++;
     if (this.busyCount == 1) this.showBusyIndicator();
 };
+
 ApplicationPane.prototype.unbusy = function () {
     if (this.busyCount > 0) this.busyCount --;
     if (this.busyCount == 0) this.hideBusyIndicator();
+};
+ApplicationPane.prototype.unbusyAfter = function (callback) {
+    return function() {
+        try {
+            callback.apply(this, arguments);
+        } finally {
+            ApplicationPane._instance.unbusy();
+        }
+    };
 };
 ApplicationPane.prototype.invalidatePropertyEditor = function () {
     if (!Pencil.activeCanvas.currentController) {
@@ -293,4 +345,8 @@ ApplicationPane.prototype.toggleLeftPane = function () {
     } else {
         this.leftSidePane.openLast();
     }
+};
+
+ApplicationPane.prototype.setContentVisible = function (visible) {
+    this.contentBody.style.visibility = visible ? "visible" : "hidden";
 };

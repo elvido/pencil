@@ -2,79 +2,10 @@ function FileHandler(controller){
     this.controller = controller;
 }
 
-FileHandler.prototype.parseOldFormatDocument = function (filePath, callback) {
-    var targetDir = Pencil.documentHandler.tempDir.name;
-    var oldPencilDocument = Pencil.documentHandler.preDocument;
-    var thiz = this;
-    this.pathToRefCache = null;
-    try {
-        if (path.extname(filePath) != ".ep" && path.extname(filePath) != ".epz") throw "Wrong format.";
+FileHandler.ERROR_NOT_FOUND = "ERROR_NOT_FOUND";
+FileHandler.ERROR_FILE_LOADING_FAILED = "ERROR_FILE_LOADING_FAILED";
+FileHandler.ERROR_FILE_SAVING_FAILED = "ERROR_FILE_SAVING_FAILED";
 
-        this.controller.documentPath = filePath;
-        this.controller.oldPencilDoc = true;
-        var dom = Controller.parser.parseFromString(fs.readFileSync(filePath, "utf8"), "text/xml");
-
-        Dom.workOn("./p:Properties/p:Property", dom.documentElement, function (propNode) {
-            thiz.controller.doc.properties[propNode.getAttribute("name")] = propNode.textContent;
-        });
-
-        var pageNodes = Dom.getList("./p:Pages/p:Page", dom.documentElement);
-        console.log(pageNodes);
-        var pageNodeIndex = -1;
-        function parseNextPageNode(__callback) {
-            pageNodeIndex ++;
-            if (pageNodeIndex >= pageNodes.length) {
-                __callback();
-                return;
-            }
-
-            var pageNode = pageNodes[pageNodeIndex];
-            thiz.parsePageFromNode(pageNode, function () {
-                parseNextPageNode(__callback);
-            });
-        }
-
-        // update page thumbnails
-        var index = -1;
-        function generateNextThumbnail(onDone) {
-            index ++;
-            if (index >= thiz.controller.doc.pages.length) {
-                if (onDone) onDone();
-                return;
-            }
-            var page = thiz.controller.doc.pages[index];
-            thiz.controller.updatePageThumbnail(page, function () {
-                generateNextThumbnail(onDone);
-            });
-        }
-        if (pageNodes.length == 0 && index == -1 && pageNodeIndex == -1) throw "Wrong format.";
-        parseNextPageNode(function () {
-            generateNextThumbnail(function () {
-                thiz.controller.modified = false;
-                thiz.controller.sayControllerStatusChanged();
-                if (thiz.controller.doc.pages.length > 0) thiz.controller.activatePage(thiz.controller.doc.pages[0]);
-                thiz.controller.pathToRefCache = null;
-                if (callback) callback();
-                ApplicationPane._instance.unbusy();
-            });
-        });
-
-        this.controller.doc.name = this.controller.getDocumentName();
-        Pencil.documentHandler.preDocument = filePath;
-    } catch (e) {
-        console.log(e);
-
-        ApplicationPane._instance.unbusy();
-        Dialog.alert("Unexpected error while accessing file: " + path.basename(filePath), null, function() {
-            (oldPencilDocument != null) ? Pencil.documentHandler.loadDocument(oldPencilDocument) : function() {
-                Pencil.controller.confirmAndclose(function () {
-                    Pencil.documentHandler.resetDocument();
-                    ApplicationPane._instance.showStartupPane();
-                });
-            };
-        });
-    }
-};
 
 FileHandler.prototype.parseDocument = function (filePath, callback) {
     var targetDir = Pencil.documentHandler.tempDir.name;
@@ -82,7 +13,11 @@ FileHandler.prototype.parseDocument = function (filePath, callback) {
     var thiz = this;
     try {
         var contentFile = path.join(targetDir, "content.xml");
-        if (!fs.existsSync(contentFile)) throw Util.getMessage("content.specification.is.not.found.in.the.archive");
+        if (!fs.existsSync(contentFile)) {
+            if (callback) callback(new Error(Util.getMessage("content.specification.is.not.found.in.the.archive")));
+            return;
+        }
+
         var dom = Controller.parser.parseFromString(fs.readFileSync(contentFile, "utf8"), "text/xml");
         Dom.workOn("./p:Properties/p:Property", dom.documentElement, function (propNode) {
             var value = propNode.textContent;
@@ -90,16 +25,21 @@ FileHandler.prototype.parseDocument = function (filePath, callback) {
             thiz.controller.doc.properties[propNode.getAttribute("name")] = value;
         });
         Dom.workOn("./p:Pages/p:Page", dom.documentElement, function (pageNode) {
-            var page = new Page(thiz.controller.doc);
+            if (!pageNode) return;
             var pageFileName = pageNode.getAttribute("href");
+            if (pageFileName == null) return;
+            var pageFile = path.join(targetDir, pageFileName);
+            if (!fs.existsSync(pageFile)) {
+                return;
+            }
+            var page = new Page(thiz.controller.doc);
             page.pageFileName = pageFileName;
-            page.tempFilePath = path.join(targetDir, pageFileName);
+            page.tempFilePath = pageFile;
             thiz.controller.doc.pages.push(page);
         });
 
         thiz.controller.doc.pages.forEach(function (page) {
-            var pageFile = path.join(targetDir, page.pageFileName);
-            if (!fs.existsSync(pageFile)) throw Util.getMessage("page.specification.is.not.found.in.the.archive");
+            var pageFile = page.tempFilePath;
             var dom = Controller.parser.parseFromString(fs.readFileSync(pageFile, "utf8"), "text/xml");
             Dom.workOn("./p:Properties/p:Property", dom.documentElement, function (propNode) {
                 var propName = propNode.getAttribute("name");
@@ -138,6 +78,8 @@ FileHandler.prototype.parseDocument = function (filePath, callback) {
             if (fs.existsSync(thumbPath)) {
                 page.thumbPath = thumbPath;
                 page.thumbCreated = new Date();
+            } else {
+                thiz.controller.invalidateBitmapFilePath(page);
             }
             page.canvas = null;
         }, thiz);
@@ -145,13 +87,17 @@ FileHandler.prototype.parseDocument = function (filePath, callback) {
         thiz.controller.doc.pages.forEach(function (page) {
             if (page.backgroundPageId) {
                 page.backgroundPage = this.controller.findPageById(page.backgroundPageId);
-                this.invalidateBitmapFilePath(page);
+                thiz.controller.invalidateBitmapFilePath(page);
             }
-
             if (page.parentPageId) {
                 var parentPage = this.controller.findPageById(page.parentPageId);
-                page.parentPage = parentPage;
-                parentPage.children.push(page);
+                if (parentPage){
+                    page.parentPage = parentPage;
+                    parentPage.children.push(page);
+                } else {
+                    console.log("Remove parent page due to does not exist --> " + page.parentPageId);
+                    delete page.parentPageId;
+                }
             }
         }, thiz);
 
@@ -163,20 +109,24 @@ FileHandler.prototype.parseDocument = function (filePath, callback) {
         FontLoader.instance.setDocumentRepoDir(path.join(targetDir, "fonts"));
         FontLoader.instance.loadFonts(function () {
             thiz.controller.sayControllerStatusChanged();
+            var activePage = null;
             if (thiz.controller.doc.properties.activeId) {
-                thiz.controller.activatePage(thiz.controller.findPageById(thiz.controller.doc.properties.activeId));
-            } else {
-                if (thiz.controller.doc.pages.length > 0) thiz.activatePage(thiz.controller.doc.pages[0]);
+                activePage = thiz.controller.findPageById(thiz.controller.doc.properties.activeId);
+            }
+            if (activePage == null && thiz.controller.doc.pages.length > 0) {
+                activePage = thiz.controller.doc.pages[0];
+            }
+            if (activePage != null) {
+                thiz.controller.activatePage(activePage);
             }
             thiz.controller.applicationPane.onDocumentChanged();
             thiz.modified = false;
             if (callback) callback();
-            ApplicationPane._instance.unbusy();
         });
         Pencil.documentHandler.preDocument = filePath;
     } catch (e) {
         // Pencil.documentHandler.newDocument()
-        ApplicationPane._instance.unbusy();
+        console.log(e);
         Dialog.alert("Unexpected error while accessing file: " + path.basename(filePath), null, function() {
             (oldPencilDocument != null) ? Pencil.documentHandler.loadDocument(oldPencilDocument) : function() {
                 Pencil.controller.confirmAndclose(function () {
@@ -250,7 +200,7 @@ FileHandler.prototype.parsePageFromNode = function (pageNode, callback) {
 
         if (page.backgroundColor) page.backgroundColor = Color.fromString(page.backgroundColor);
 
-        if (page.backgroundPageId) page.backgroundPage = thiz.findPageById(page.backgroundPageId);
+        if (page.backgroundPageId) page.backgroundPage = thiz.controller.findPageById(page.backgroundPageId);
 
         var pageFileName = "page_" + page.id + ".xml";
         page.pageFileName = pageFileName;

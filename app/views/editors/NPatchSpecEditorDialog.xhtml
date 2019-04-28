@@ -3,7 +3,8 @@
         .CellContainer {
             position: relative;
             box-sizing: border-box;
-            background: rgba(255, 255, 255, 0.4);
+            background-image: linear-gradient(to bottom, #D0D0D0 0px, #FFFFFF 100%);
+            background-repeat: repeat-x;
         }
         @xCellContainer {
             height: 1.5em;
@@ -11,6 +12,8 @@
         }
         @yCellContainer {
             width: 1.5em;
+            background-image: linear-gradient(to right, #D0D0D0 0px, #FFFFFF 100%);
+            background-repeat: repeat-y;
         }
         .CellContainer > .Cell {
             position: absolute;
@@ -49,7 +52,7 @@
             height: 0.5em;
             cursor: ns-resize;
         }
-        @xCellContainer > .Cell > .StartResizer {
+        @yCellContainer > .Cell > .StartResizer {
             top: -0.25em;
         }
         @yCellContainer > .Cell > .EndResizer {
@@ -70,6 +73,30 @@
             opacity: 0.2;
             cursor: default;
         }
+
+        .CellContainer > .Cell > .XCellInfo {
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            height: 1.5em;
+        }
+        .CellContainer > .Cell > .YCellInfo {
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            width: 1.5em;
+        }
+        .CellContainer > .Cell > .XCellInfo > .Info {
+            margin-top: 0.25em;
+        }
+        .CellContainer > .Cell > .YCellInfo > .Info {
+            margin-left: 0.25em;
+        }
+        @xCellContainer > .Cell > .Indicator {
+            top: 1.5em;
+            left: 0px;
+            right: 0px;
+        }
         @xCellContainer > .Cell > .Indicator {
             top: 1.5em;
             left: 0px;
@@ -84,25 +111,30 @@
         @container {
             align-items: center;
             justify-content: center;
+            margin-bottom: 1ex;
+        }
+        @container[dark='true'] {
+            background: #555;
         }
         @container > * {
-            background: rgba(0, 0, 0, 0.2);
-            padding-right: 1.5em;
-            padding-bottom: 1.5em;
+            /* background: rgba(0, 0, 0, 0.2); */
+            padding-right: 0em;
+            padding-bottom: 0em;
         }
         @image {
-            box-shadow: 0em 0em 0.4em rgba(0, 0, 0, 0.1);
+            box-shadow: 0em 0em 0.8em rgba(0, 0, 0, 0.2);
         }
     </style>
     <div anon-id="container">
          <vbox>
-             <hbox>
+             <vbox>
                  <div anon-id="xCellContainer" class="CellContainer" flex="1"></div>
-             </hbox>
+             </vbox>
              <hbox>
                 <div anon-id="yCellContainer" class="CellContainer"></div>
                 <img anon-id="image" />
             </hbox>
        </vbox>
    </div>
+   <hbox><input anon-id="useDarkBackgroundCheckbox" type="checkbox" /><label for="useDarkBackgroundCheckbox">Use dark background</label></hbox>
 </vbox>

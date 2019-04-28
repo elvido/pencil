@@ -11,7 +11,6 @@ SharedPropertyEditor.prototype.setup = function () {
     var thiz = this;
 
     this.propertyContainer.addEventListener("p:ValueChanged", function(event) {
-        console.log("p:ValueChanged", event);
         if (!thiz.target) return;
         var editor = Dom.findUpward(event.target, function (n) {
             return n._property;
@@ -30,6 +29,10 @@ SharedPropertyEditor.prototype.setup = function () {
             thiz.setDefaultProperties();
         }
     }, false);
+    this.propertyContainer.addEventListener("input", function(event) {
+        if (event.target != thiz.symbolNameInput || !thiz.target || !thiz.target.setSymbolName) return;
+        thiz.target.setSymbolName(event.target.value.trim());
+    }, false);
 };
 SharedPropertyEditor.prototype.getTitle = function() {
 	return "Properties";
@@ -45,21 +48,22 @@ SharedPropertyEditor.prototype.sizeChanged = function (expanded) {
 	}
 }
 SharedPropertyEditor.prototype.validationEditorUI = function() {
-    if (!this.validationEditor) return ;
+    if (!this.validationEditor) return;
 
+    var allowDisabled = Config.get(Config.DEV_ENABLE_DISABLED_IN_PROP_PAGE);
     for (var i = 0; i < this.validationEditor.length; i++) {
-        this.validationEditor[i].style.display = "none";
         var name = this.validationEditor[i]._property.name;
         var meta = this.target.def.propertyMap[name].meta["disabled"];
-        var value = this.target.evalExpression(meta, true);
+        var disabled = !allowDisabled && this.target.evalExpression(meta, true);
 
-        if (!value) this.validationEditor[i].style.display = "inherit";
+        this.validationEditor[i].style.display = disabled ? "none" : "flex";
     }
-}
+};
 
 SharedPropertyEditor.prototype.attach = function (target) {
 
     if (!target) return;
+    if (target && target.getAttributeNS && target.getAttributeNS(PencilNamespaces.p, "locked") == "true") { return; }
 
     if (!this.canAttach) {
 		this.pendingTarget = target;
@@ -76,6 +80,8 @@ SharedPropertyEditor.prototype.attach = function (target) {
 
     this.target = target;
 
+    if (this.target.prepareExpressionEvaluation) this.target.prepareExpressionEvaluation();
+
     this.propertyEditor = {};
     this.propertyContainer.innerHTML = "";
     var definedGroups = this.target.getPropertyGroups();
@@ -86,6 +92,7 @@ SharedPropertyEditor.prototype.attach = function (target) {
         var group = definedGroups[i];
         for (var j in group.properties) {
             var property = group.properties[j];
+
             var editor = TypeEditorRegistry.getTypeEditor(property.type);
             if (!editor) continue;
 
@@ -111,10 +118,14 @@ SharedPropertyEditor.prototype.attach = function (target) {
     var groupNodes = [];
 
     var properties = [];
+
+    var allowDisabled = Config.get(Config.DEV_ENABLE_DISABLED_IN_PROP_PAGE);
+
     for (var i in definedGroups) {
         var group = definedGroups[i];
         for (var j in group.properties) {
             var property = group.properties[j];
+
             var editor = TypeEditorRegistry.getTypeEditor(property.type);
             if (!editor) continue;
             property._group = group;
@@ -149,6 +160,27 @@ SharedPropertyEditor.prototype.attach = function (target) {
                 });
                 thiz.propertyContainer.appendChild(hbox);
             }
+
+            if (StencilCollectionBuilder.isDocumentConfiguredAsStencilCollection() && thiz.target.getSymbolName) {
+                thiz.propertyContainer.appendChild(Dom.newDOMElement({
+                    _name: "vbox",
+                    "class": "SymbolNameContainer",
+                    _children: [
+                        {
+                            _name: "label",
+                            _text: "Symbol Name:"
+                        },
+                        {
+                            _name: "input",
+                            type: "text",
+                            _id: "symbolNameInput",
+                            value: thiz.target.getSymbolName() || ""
+
+                        }
+                    ]
+                }, document, thiz));
+            }
+
             thiz.propertyContainer.style.display = "flex";
             thiz.propertyContainer.style.opacity = "1";
             thiz.validationEditorUI();
@@ -172,8 +204,11 @@ SharedPropertyEditor.prototype.attach = function (target) {
             thiz.propertyContainer.appendChild(currentGroupNode);
             groupNodes.push(currentGroupNode);
         }
-        var propName = property.displayName ? property.displayName.trim() : property.displayName;
-        var groupName = property._group.name ? property._group.name.trim() : property._group.name;
+        var propName = property.displayName ? property.displayName.trim() : null;
+        var groupName = property._group.name ? property._group.name.trim() : null;
+
+        if (!propName || !groupName) { return; }
+
         if (propName.indexOf(groupName) == 0) {
             propName = propName.substring(groupName.length);
         }
@@ -200,17 +235,22 @@ SharedPropertyEditor.prototype.attach = function (target) {
         editorWrapper.appendChild(editorWidget.node());
         editorWidget.setAttribute("flex", "3");
         if (editorWidget.setTypeMeta) {
-            editorWidget.setTypeMeta(property.meta);
+            editorWidget.setTypeMeta(property.meta, property);
         }
         editorWidget.setValue(thiz.target.getProperty(property.name));
         thiz.propertyEditor[property.name] = editorWidget;
         editorWrapper._property = property;
 
-        if (property.reload) {
+        var meta = property.meta["disabled"];
+
+        if (meta) {
             if (!thiz.validationEditor) thiz.validationEditor = [];
             thiz.validationEditor.push(editorWrapper);
-            editorWrapper.style.display = "none";
+
+            var disabled = !allowDisabled && thiz.target.evalExpression(meta, true);
+            editorWrapper.style.display = disabled ? "none" : "flex";
         }
+
         currentGroupNode.appendChild(editorWrapper);
         window.setTimeout(executor(), 40);
     };

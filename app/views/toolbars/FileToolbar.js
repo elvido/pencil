@@ -94,6 +94,16 @@ FileToolbar.prototype.registerCommands = function () {
     });
 
     UICommandManager.register({
+        key: "copyPageBitmapCommand",
+        label: "Copy Page Bitmap",
+        isValid: function () { return true; },
+        run: function () {
+            Pencil.controller.copyPageBitmap(Pencil.controller.activePage);
+        },
+        shortcut: "Ctrl+Shift+C"
+    });
+
+    UICommandManager.register({
         key: "exportSelectionAsPNGButton",
         label: "Export selection as PNG...",
         run: function () {

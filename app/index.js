@@ -1,9 +1,5 @@
 "use strict";
 
-if (require('electron-squirrel-startup')) {
-  return;
-}
-
 const {app, protocol, shell, BrowserWindow} = require("electron");
 const pkg      = require("./package.json");
 const fs       = require("fs");
@@ -19,6 +15,7 @@ if (process.platform.trim().toLowerCase() == "linux" && app.disableHardwareAccel
     app.disableHardwareAcceleration();
 }
 
+global.sharedObject = { appArguments: process.argv };
 
 var handleRedirect = (e, url) => {
     e.preventDefault();
@@ -82,6 +79,11 @@ function createWindow() {
 
     app.mainWindow = mainWindow;
     global.mainWindow = mainWindow;
+
+    // const updater = require('./updater');
+    // setTimeout(function() {
+    //     updater.checkForUpdates();
+    // }, 3000);
 }
 
 // Quit when all windows are closed.
@@ -94,11 +96,13 @@ app.on("window-all-closed", function() {
 app.on('ready', function() {
     protocol.registerBufferProtocol("ref", function(request, callback) {
         var path = request.url.substr(6);
-        console.log("PATH", path);
 
         fs.readFile(path, function (err, data) {
-            console.log("Got data: ", data.length);
-            callback({mimeType: "image/jpeg", data: new Buffer(data)});
+            if (err) {
+                callback({mimeType: "text/html", data: new Buffer("Not found")});
+            } else {
+                callback({mimeType: "image/jpeg", data: new Buffer(data)});
+            }
         });
 
     }, function (error, scheme) {
@@ -116,6 +120,9 @@ app.on('ready', function() {
 
     const webPrinter = require("./pencil-core/common/webPrinter");
     webPrinter.start();
+
+    const globalShortcutMainService = require("./tools/global-shortcut-main.js");
+    globalShortcutMainService.start();
 });
 app.on("activate", function() {
     // On OS X it's common to re-create a window in the app when the
@@ -127,8 +134,10 @@ app.on("activate", function() {
     }
 });
 
+app.on("will-quit", function () {
+  require("electron").globalShortcut.unregisterAll()
+});
+
 process.on('uncaughtException', function (error) {
     console.error(error);
 });
-
-console.log("Platform: " + process.platform.trim());

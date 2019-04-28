@@ -7,6 +7,11 @@ function NPatchSpecEditorDialog () {
     this.bind("mousedown", this.handleGlobalMouseDown, this.yCellContainer);
     this.bind("mouseup", this.handleGlobalMouseUp, document);
     this.bind("mousemove", this.handleGlobalMouseMove, document);
+
+    this.bind("click", function () {
+        console.log(this.useDarkBackgroundCheckbox.checked);
+        this.container.setAttribute("dark", this.useDarkBackgroundCheckbox.checked);
+    }, this.useDarkBackgroundCheckbox);
 }
 __extend(Dialog, NPatchSpecEditorDialog);
 
@@ -23,6 +28,9 @@ NPatchSpecEditorDialog.prototype.addCell = function (from, to, isX) {
         _uri: PencilNamespaces.html,
         "class": "Cell",
         _children: [
+            {_name: "div", _uri: PencilNamespaces.html, "class": (isX ? "XCellInfo" : "YCellInfo"), _id: "info", _children: [
+                {_name: "div", _uri: PencilNamespaces.html, "class": "Info", _id: "cellInfo", "flex" : "1"}
+            ]},
             {_name: "div", _uri: PencilNamespaces.html, "class": "Indicator", _id: "indicator"},
             {_name: "div", _uri: PencilNamespaces.html, "class": "StartResizer Resizer"},
             {_name: "div", _uri: PencilNamespaces.html, "class": "EndResizer Resizer"}
@@ -33,14 +41,14 @@ NPatchSpecEditorDialog.prototype.addCell = function (from, to, isX) {
     } else {
         this.yCellContainer.appendChild(div);
     }
-
     div._data = {from: from, to: to};
+    div._isX = isX;
+    div._cellInfo = holder.cellInfo;
     div._indicator = holder.indicator;
     this.invalidateCellPosition(div);
 
     return div;
 };
-
 NPatchSpecEditorDialog.prototype.handleGlobalMouseDown = function (event) {
     var cell = Dom.findParentWithClass(event.target, "Cell");
     var indicator = Dom.findParentWithClass(event.target, "Indicator");
@@ -129,20 +137,29 @@ NPatchSpecEditorDialog.prototype.handleGlobalMouseMove = function (event) {
     this.invalidateCellPosition(this.held.cell);
 };
 NPatchSpecEditorDialog.prototype.invalidateCellPosition = function (cell) {
-    var a = Math.round(cell._data.from / this.r);
-    var b = Math.round(cell._data.to / this.r);
-
+    var a = Math.floor(cell._data.from / this.r);
+    var b = Math.floor(cell._data.to / this.r);
+    var s = b - a;
     if (cell.parentNode == this.xCellContainer) {
         cell.style.left = a + "px";
-        cell.style.width = (b - a) + "px"
+        cell.style.width = s + "px"
         cell._indicator.style.bottom = (0 - this.options.imageData.h / this.r) + "px";
     } else {
         cell.style.top = a + "px";
-        cell.style.height = (b - a) + "px"
+        cell.style.height = s + "px"
         cell._indicator.style.right = (0 - this.options.imageData.w / this.r) + "px";
     }
-
+    var info = cell._cellInfo;
+    if (info) {
+        info.textContent = (cell._data.to - cell._data.from);
+        if (!cell._isX) {
+            var w = Math.round(info.offsetWidth);
+            var r = (s/2) - (w/2);
+            info.style.transform = "rotate(-90deg) translate(-" + r + "px, 0px)";
+        }
+    }
 };
+
 NPatchSpecEditorDialog.prototype.setup = function (options) {
     this.options = options || {};
     var minSize = 10 * Util.em();
@@ -152,7 +169,7 @@ NPatchSpecEditorDialog.prototype.setup = function (options) {
     var r0 = Math.max(this.options.imageData.w / maxW, this.options.imageData.h / maxH);
     var r1 = Math.min(this.options.imageData.w / minSize, this.options.imageData.h / minSize);
 
-    this.image.src = ImageData.refStringToUrl(this.options.imageData.data);
+    this.image.src = this.options.imageData.toImageSrc();
 
     var r = r1 < 1 ? r1 : r0;
     this.setZoom(r);

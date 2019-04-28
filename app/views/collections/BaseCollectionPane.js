@@ -29,7 +29,7 @@ function BaseCollectionPane() {
         thiz.filterCollections();
     }, this.clearTextButton);
 
-    this.shapeList.addEventListener("dragstart", function (event) {
+    this.shapeListContainer.addEventListener("dragstart", function (event) {
         nsDragAndDrop.dragStart(event);
         var n = Dom.findUpwardForNodeWithData(Dom.getTarget(event), "_def");
         var def = n._def;
@@ -123,6 +123,7 @@ BaseCollectionPane.prototype.onSizeChanged = function () {
     if (!this.loaded) {
         setTimeout(this.reload.bind(this), 300);
     }
+    this.updateLayoutSize();
 };
 BaseCollectionPane.prototype.reload = function (selectedCollectionId) {
     if (this.node().offsetWidth <= 0) return;
@@ -145,22 +146,34 @@ BaseCollectionPane.prototype.reload = function (selectedCollectionId) {
         var collection = collections[i];
         if(this.isShowCollection(collection)) {
             var icon = this.getCollectionIcon(collection);
+            var typeClass = collection.developerStencil ? "TypeDeveloper" : (collection.userDefined ? "TypeUser" : "TypeSystem");
             var node = Dom.newDOMElement({
                 _name: "vbox",
-                "class": "Item",
+                "class": "Item" + (collection.previewURL ? " WithPreview" : "") + " " + typeClass,
                 "tabindex": "0",
+                title: collection.displayName,
                 _children: [
+                    {
+                        _name: "div",
+                        "class": "Preview",
+                        _children: [
+                            {
+                                _name: "img",
+                                src: collection.previewURL
+                            }
+                        ]
+                    },
                     {
                         _name: "div",
                         "class": "ItemInner",
                         _children: [
                             {
-                                _name: "span",
-                                _text: collection.displayName
-                            },
-                            {
                                 _name: "i",
                                 _text: icon
+                            },
+                            {
+                                _name: "span",
+                                _text: collection.displayName
                             }
                         ]
                     }
@@ -189,9 +202,9 @@ BaseCollectionPane.prototype.reload = function (selectedCollectionId) {
 
             var w = inner.clientWidth + 4 * Util.em();
 
-            item.style.height = w + "px";
-            item.firstChild.style.width = w + "px";
-            item.firstChild.style.transform = "rotate(-90deg) translate(-" + w + "px, 0px)";
+            //item.style.height = w + "px";
+            //item.firstChild.style.width = "5em";
+            //item.firstChild.style.transform = "rotate(-90deg) translate(-" + w + "px, 0px)";
         }
         thiz.collectionScrollView.invalidate();
     }, 10);
@@ -218,12 +231,17 @@ BaseCollectionPane.prototype.filterCollections = function () {
         var collection = collectionNodes[i]._collection;
         collection._shapeCount = 0;
         collection._filteredShapes = [];
-        for (var j in collection.shapeDefs) {
-            var def = collection.shapeDefs[j];
-            if (!def || def.system) continue;
-            if (def.displayName.toLowerCase().indexOf(filter.toLowerCase()) == -1) continue;
-            collection._shapeCount++;
-            collection._filteredShapes.push(def);
+        if (!filter) {
+            delete collection._filteredShapes;
+            collection._shapeCount = collection.shapeDefs.length;
+        } else {
+            for (var j in collection.shapeDefs) {
+                var def = collection.shapeDefs[j];
+                if (!def || def.system) continue;
+                if (def.displayName.toLowerCase().indexOf(filter.toLowerCase()) == -1) continue;
+                collection._shapeCount++;
+                collection._filteredShapes.push(def);
+            }
         }
         if (collection._shapeCount <= 0) {
             collectionNode.setAttribute("_hidden", true);
@@ -251,6 +269,7 @@ BaseCollectionPane.prototype.filterCollections = function () {
         Dom.empty(this.collectionTitle);
         Dom.empty(this.collectionDescription);
         Dom.empty(this.shapeList);
+        Dom.empty(this.collectionLayoutContainer);
         this.settingButton.style.visibility = "hidden";
     }
 };
@@ -269,19 +288,109 @@ BaseCollectionPane.prototype.ensureVisibleShapeIcons = function () {
             }
     }
 };
+BaseCollectionPane.prototype.updateLayoutSize = function () {
+    if (!this.last || !this.last.customLayout) return;
+
+    this.layoutOriginalSize = {
+        width: this.collectionLayoutContainer.firstChild.firstChild.offsetWidth,
+        height: this.collectionLayoutContainer.firstChild.firstChild.offsetHeight
+    };
+
+    var W = this.collectionLayoutContainer.offsetWidth;
+    var r = W / this.layoutOriginalSize.width;
+    var H = this.layoutOriginalSize.height * r;
+
+    this.collectionLayoutContainer.style.height = H + "px";
+    this.collectionLayoutContainer.firstChild.style.zoom = r;
+};
 BaseCollectionPane.prototype.openCollection = function (collection) {
     Dom.empty(this.shapeList);
+    Dom.empty(this.collectionLayoutContainer);
     this.collectionIcon.innerHTML = this.getCollectionIcon(collection);
     this.collectionTitle.innerHTML = Dom.htmlEncode(collection.displayName);
     this.collectionDescription.innerHTML = Dom.htmlEncode(collection.description);
     this.collectionDescription.setAttribute("title", collection.description);
     this.settingButton.style.visibility =  (collection.propertyGroups && collection.propertyGroups.length > 0) ? "inherit" : "hidden";
 
-    this.last = collection;
+    this.layoutOriginalSize = null;
+
+    this.layoutItemMap = {};
+
+    var thiz = this;
+
     var shapeDefs = typeof(collection._filteredShapes) == "undefined" ? collection.shapeDefs : collection._filteredShapes;
+    if (collection.customLayout) {
+        if (collection.customLayout.parentNode) collection.customLayout.parentNode.removeChild(collection.customLayout);
+        this.collectionLayoutContainer.appendChild(collection.customLayout);
+
+        var hasMatched = false;
+
+        Dom.workOn(".//*[@sc-ref]", this.collectionLayoutContainer, function (n) {
+            var scName = n.getAttribute("sc-ref");
+            var sc = collection.getShortcutByDisplayName(collection.id + ":" + scName);
+            n._def = sc;
+            n.setAttribute("draggable", "true");
+            n.setAttribute("title", scName);
+            thiz.layoutItemMap[scName] = n;
+
+            if (collection._filteredShapes) {
+                var matched = collection._filteredShapes.indexOf(sc) >= 0;
+                if (matched) hasMatched = true;
+                n.setAttribute("matched", matched);
+            } else {
+                n.removeAttribute("matched");
+            }
+        });
+        Dom.workOn(".//*[@ref]", this.collectionLayoutContainer, function (n) {
+            var defId = n.getAttribute("ref");
+            var def = CollectionManager.shapeDefinition.locateDefinition(defId);
+            n._def = def;
+            n.setAttribute("draggable", "true");
+            n.setAttribute("title", def.displayName);
+            thiz.layoutItemMap[defId] = n;
+            if (collection._filteredShapes) {
+                var matched = collection._filteredShapes.indexOf(def) >= 0;
+                if (matched) hasMatched = true;
+                n.setAttribute("matched", matched);
+            } else {
+                n.removeAttribute("matched");
+            }
+        });
+        Dom.workOn(".//*[@pr-ref]", this.collectionLayoutContainer, function (n) {
+            if (!collection.builtinPrivateCollection || !collection.builtinPrivateCollection.map) return;
+            var defId = n.getAttribute("pr-ref");
+            var def = collection.builtinPrivateCollection.map[defId];
+            if (!def) return;
+            n._def = def;
+            n.setAttribute("draggable", "true");
+            n.setAttribute("title", def.displayName);
+        });
+
+        this.collectionLayoutContainer.style.display = "block";
+        // this.collectionLayoutContainer.style.overflow = "hidden";
+        this.collectionLayoutContainer.style.visibility = "hidden";
+        this.collectionLayoutContainer.style.height = "1px";
+
+        if (!hasMatched && collection._filteredShapes) {
+            this.collectionLayoutContainer.style.display = "none";
+        } else {
+            window.setTimeout(function () {
+                thiz.updateLayoutSize();
+                thiz.collectionLayoutContainer.style.visibility = "inherit";
+            }, 10);
+        }
+    } else {
+        this.collectionLayoutContainer.style.display = "none";
+    }
+
+    this.last = collection;
     for (var i = 0; i < shapeDefs.length; i ++) {
         var def = shapeDefs[i];
         if (def.system) continue;
+
+        var itemId = (def instanceof ShapeDef) ? def.id : def.displayName;
+        if (this.layoutItemMap[itemId]) continue;
+
         var icon = def.iconPath;
         if (!icon && def.shape) icon = def.shape.iconPath;
 
@@ -341,6 +450,8 @@ BaseCollectionPane.prototype.openCollection = function (collection) {
     window.setTimeout(function () {
         thiz.ensureVisibleShapeIcons();
     }, 200);
+
+    this.updateLayoutSize();
 };
 
 BaseCollectionPane.prototype.ensureSelectedCollectionVisible = function (collection) {
